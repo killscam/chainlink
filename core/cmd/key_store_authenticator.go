@@ -2,8 +2,11 @@ package cmd
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/pkg/errors"
+	"go.uber.org/multierr"
 
 	"github.com/smartcontractkit/chainlink/core/store"
 	"github.com/smartcontractkit/chainlink/core/utils"
@@ -45,6 +48,72 @@ func (auth TerminalKeyStoreAuthenticator) Authenticate(store *store.Store, passw
 	}
 }
 
+func (auth TerminalKeyStoreAuthenticator) validatePasswordStrength(store *store.Store, password string) error {
+	// Password policy:
+	//
+	// Must be longer than 12 characters
+	// Must comprise at least 3 of:
+	//     lowercase characters
+	//     uppercase characters
+	//     numbers
+	//     symbols
+	// Must not comprise:
+	//     A user's API email
+	//     More than three identical consecutive characters
+
+	var (
+		lowercase = regexp.MustCompile("[a-z]")
+		uppercase = regexp.MustCompile("[A-Z]")
+		numbers   = regexp.MustCompile("[0-9]")
+		symbols   = regexp.MustCompile(`[!@#$%^&*()-=_+\[\]\\|;:'",<.>/?~` + "`]")
+	)
+
+	var merr error
+	if len(password) <= 12 {
+		merr = multierr.Append(merr, errors.New("must be longer than 12 characters"))
+	}
+	if len(lowercase.FindAllString(password, -1)) < 3 {
+		merr = multierr.Append(merr, errors.New("must contain at least 3 lowercase characters"))
+	}
+	if len(uppercase.FindAllString(password, -1)) < 3 {
+		merr = multierr.Append(merr, errors.New("must contain at least 3 uppercase characters"))
+	}
+	if len(numbers.FindAllString(password, -1)) < 3 {
+		merr = multierr.Append(merr, errors.New("must contain at least 3 numbers"))
+	}
+	if len(symbols.FindAllString(password, -1)) < 3 {
+		merr = multierr.Append(merr, errors.New("must contain at least 3 symbols"))
+	}
+	var c byte
+	var instances int
+	for i := 0; i < len(password); i++ {
+		if password[i] == c {
+			instances += 1
+		} else {
+			instances = 1
+		}
+		if instances > 3 {
+			merr = multierr.Append(merr, errors.New("must not contain more than 3 identical consecutive characters"))
+			break
+		}
+		c = password[i]
+	}
+
+	user, err := store.ORM.FindUser()
+	if err != nil {
+		return errors.Wrap(err, "while fetching user from DB to validate password")
+	}
+
+	if strings.Contains(password, user.Email) {
+		merr = multierr.Append(merr, errors.New("must not contain the email address associated with the node"))
+	}
+
+	if merr != nil {
+		merr = errors.Wrap(merr, "Password does not meet the following requirements")
+	}
+	return merr
+}
+
 func (auth TerminalKeyStoreAuthenticator) promptExistingPassword(store *store.Store) (string, error) {
 	for {
 		password := auth.Prompter.PasswordPrompt("Enter key store password:")
@@ -57,6 +126,11 @@ func (auth TerminalKeyStoreAuthenticator) promptExistingPassword(store *store.St
 func (auth TerminalKeyStoreAuthenticator) promptNewPassword(store *store.Store) (string, error) {
 	for {
 		password := auth.Prompter.PasswordPrompt("New key store password: ")
+		err := auth.validatePasswordStrength(store, password)
+		if err != nil {
+			return password, err
+		}
+
 		clearLine()
 		passwordConfirmation := auth.Prompter.PasswordPrompt("Confirm password: ")
 		clearLine()
@@ -64,7 +138,7 @@ func (auth TerminalKeyStoreAuthenticator) promptNewPassword(store *store.Store) 
 			fmt.Printf("Passwords don't match. Please try again... ")
 			continue
 		}
-		err := store.KeyStore.Unlock(password)
+		err = store.KeyStore.Unlock(password)
 		if err != nil {
 			return password, errors.Wrap(err, "unexpectedly failed to unlock KeyStore")
 		}
@@ -78,7 +152,11 @@ func (auth TerminalKeyStoreAuthenticator) promptNewPassword(store *store.Store) 
 }
 
 func (auth TerminalKeyStoreAuthenticator) unlockNewWithPassword(store *store.Store, password string) (string, error) {
-	err := store.KeyStore.Unlock(password)
+	err := auth.validatePasswordStrength(store, password)
+	if err != nil {
+		return password, err
+	}
+	err = store.KeyStore.Unlock(password)
 	if err != nil {
 		return "", errors.Wrap(err, "Error unlocking key store")
 	}
