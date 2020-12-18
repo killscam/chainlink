@@ -333,7 +333,8 @@ func TestIntegration_ExternalAdapter_RunLogInitiated(t *testing.T) {
 	mockServer, ensureRequest := cltest.NewHTTPMockServer(t, http.StatusOK, "POST", eaResponse)
 	defer ensureRequest()
 
-	bridgeJSON := fmt.Sprintf(`{"name":"randomNumber","url":"%v","confirmations":10}`, mockServer.URL)
+	confsNeeded := 10
+	bridgeJSON := fmt.Sprintf(`{"name":"randomNumber","url":"%v","confirmations":%d}`, mockServer.URL, confsNeeded)
 	cltest.CreateBridgeTypeViaWeb(t, app, bridgeJSON)
 	j := cltest.FixtureCreateJobViaWeb(t, app, "fixtures/web/log_initiated_bridge_type_job.json")
 
@@ -344,23 +345,28 @@ func TestIntegration_ExternalAdapter_RunLogInitiated(t *testing.T) {
 	jr := cltest.WaitForRuns(t, j, app.Store, 1)[0]
 	cltest.WaitForJobRunToPendIncomingConfirmations(t, app.Store, jr)
 
-	gethClient.On("BlockByNumber", mock.Anything, mock.Anything).Return(&types.Block{}, nil).Maybe()
+	// Feed a block without the tx but more than the required confs, should remain
+	// pending.
+	gethClient.On("BlockByNumber", mock.Anything, mock.Anything).Return(types.NewBlockWithHeader(&types.Header{
+		Number: big.NewInt(int64(logBlockNumber + confsNeeded)),
+	}), nil).Maybe()
 	newHeads := <-newHeadsCh
-	newHeads <- cltest.Head(logBlockNumber + 8)
+	newHeads <- cltest.Head(logBlockNumber + confsNeeded)
 	cltest.WaitForJobRunToPendIncomingConfirmations(t, app.Store, jr)
 
+	// Feed a block with the tx and required confs, should complete.
 	confirmedReceipt := &types.Receipt{
 		TxHash:      runlog.TxHash,
 		BlockHash:   runlog.BlockHash,
 		BlockNumber: big.NewInt(int64(logBlockNumber)),
 	}
 	gethClient.On("BlockByNumber", mock.Anything, mock.Anything).Return(types.NewBlockWithHeader(&types.Header{
-		Number: big.NewInt(int64(logBlockNumber + 9)),
+		Number: big.NewInt(int64(logBlockNumber + confsNeeded)),
 	}), nil).Maybe()
 	gethClient.On("TransactionReceipt", mock.Anything, mock.Anything).
 		Return(confirmedReceipt, nil)
 
-	newHeads <- cltest.Head(logBlockNumber + 9)
+	newHeads <- cltest.Head(logBlockNumber + confsNeeded)
 	jr = cltest.WaitForJobRunToComplete(t, app.Store, jr)
 
 	tr := jr.TaskRuns[0]
