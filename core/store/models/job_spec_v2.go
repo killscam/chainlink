@@ -19,6 +19,7 @@ type (
 		ID int32 `json:"-" toml:"-"                 gorm:"primary_key"`
 	}
 
+	// TODO: Rename to simply 'Job' to match table name?
 	JobSpecV2 struct {
 		IDEmbed
 		OffchainreportingOracleSpecID *int32                       `json:"-"`
